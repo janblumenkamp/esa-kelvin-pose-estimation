@@ -15,9 +15,9 @@ class SubmissionWriter:
 
     def _append(self, filename, q, r, tron):
         if tron:
-            self.tron_results.append({'filename': filename, 'q': q, 'r': r})
+            self.tron_results.append({'filename': filename, 'q': list(q), 'r': list(r)})
         else:
-            self.test_results.append({'filename': filename, 'q': q, 'r': r})
+            self.test_results.append({'filename': filename, 'q': list(q), 'r': list(r)})
         return
 
     def append_test(self, filename, q, r):
