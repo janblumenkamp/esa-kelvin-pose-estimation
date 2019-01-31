@@ -125,4 +125,4 @@ if __name__ == "__main__":
     parser.add_argument('--batch', help='number of samples in a batch.', default=32)
     args = parser.parse_args()
 
-    main(args.datapath, int(args.epochs), int(args.batch))
+    main(args.dataset, int(args.epochs), int(args.batch))
