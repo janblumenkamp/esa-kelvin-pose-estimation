@@ -4,6 +4,22 @@ import os
 from PIL import Image
 from matplotlib import pyplot as plt
 
+# deep learning framework imports
+try:
+    from tensorflow.keras.utils import Sequence
+    from tensorflow.keras.preprocessing import image as keras_image
+    has_tf = True
+except ModuleNotFoundError:
+    has_tf = False
+
+try:
+    import torch
+    from torch.utils.data import Dataset
+    from torchvision import transforms
+    has_pytorch = True
+except ImportError:
+    has_pytorch = False
+
 
 class Camera:
 
@@ -147,3 +163,134 @@ class SatellitePoseEstimationDataset:
             ax.arrow(xa[0], ya[0], xa[3] - xa[0], ya[3] - ya[0], head_width=30, color='b')
 
         return
+
+
+if has_pytorch:
+    class PyTorchSatellitePoseEstimationDataset(Dataset):
+
+        """ SPEED dataset that can be used with DataLoader for PyTorch training. """
+
+        def __init__(self, split='train', speed_root='', transform=None):
+
+            if not has_pytorch:
+                raise ImportError('Pytorch was not imported successfully!')
+
+            if split not in {'train', 'test', 'real_test'}:
+                raise ValueError('Invalid split, has to be either \'train\', \'test\' or \'real_test\'')
+
+            with open(os.path.join(speed_root, split + '.json'), 'r') as f:
+                label_list = json.load(f)
+
+            self.sample_ids = [label['filename'] for label in label_list]
+            self.train = split == 'train'
+
+            if self.train:
+                self.labels = {label['filename']: {'q': label['q_vbs2tango'], 'r': label['r_Vo2To_vbs_true']}
+                               for label in label_list}
+            self.image_root = os.path.join(speed_root, 'images', split)
+
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.sample_ids)
+
+        def __getitem__(self, idx):
+            sample_id = self.sample_ids[idx]
+            img_name = os.path.join(self.image_root, sample_id)
+
+            # note: despite grayscale images, we are converting to 3 channels here,
+            # since most pre-trained networks expect 3 channel input
+            pil_image = Image.open(img_name).convert('RGB')
+
+            if self.train:
+                q, r = self.labels[sample_id]['q'], self.labels[sample_id]['r']
+                y = np.concatenate([q, r])
+            else:
+                y = sample_id
+
+            if self.transform is not None:
+                torch_image = self.transform(pil_image)
+            else:
+                torch_image = pil_image
+
+            return torch_image, y
+else:
+    class PyTorchSatellitePoseEstimationDataset:
+        def __init__(self, *args, **kwargs):
+            raise ImportError('Pytorch is not available!')
+
+if has_tf:
+    class KerasDataGenerator(Sequence):
+
+        """ DataGenerator for Keras to be used with fit_generator (https://keras.io/models/sequential/#fit_generator)"""
+
+        def __init__(self, preprocessor, label_list, speed_root, batch_size=32, dim=(224, 224), n_channels=3, shuffle=True):
+
+            # loading dataset
+            self.image_root = os.path.join(speed_root, 'images', 'train')
+
+            # Initialization
+            self.preprocessor = preprocessor
+            self.dim = dim
+            self.batch_size = batch_size
+            self.labels = self.labels = {label['filename']: {'q': label['q_vbs2tango'], 'r': label['r_Vo2To_vbs_true']}
+                                         for label in label_list}
+            self.list_IDs = [label['filename'] for label in label_list]
+            self.n_channels = n_channels
+            self.shuffle = shuffle
+            self.indexes = None
+            self.on_epoch_end()
+
+        def __len__(self):
+
+            """ Denotes the number of batches per epoch. """
+
+            return int(np.floor(len(self.list_IDs) / self.batch_size))
+
+        def __getitem__(self, index):
+
+            """ Generate one batch of data """
+
+            # Generate indexes of the batch
+            indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+
+            # Find list of IDs
+            list_IDs_temp = [self.list_IDs[k] for k in indexes]
+
+            # Generate data
+            X, y = self.__data_generation(list_IDs_temp)
+
+            return X, y
+
+        def on_epoch_end(self):
+
+            """ Updates indexes after each epoch """
+
+            self.indexes = np.arange(len(self.list_IDs))
+            if self.shuffle:
+                np.random.shuffle(self.indexes)
+
+        def __data_generation(self, list_IDs_temp):
+
+            """ Generates data containing batch_size samples """
+
+            # Initialization
+            X = np.empty((self.batch_size, *self.dim, self.n_channels))
+            y = np.empty((self.batch_size, 7), dtype=float)
+
+            # Generate data
+            for i, ID in enumerate(list_IDs_temp):
+                img_path = os.path.join(self.image_root, ID)
+                img = keras_image.load_img(img_path, target_size=(224, 224))
+                x = keras_image.img_to_array(img)
+                x = self.preprocessor(x)
+                X[i,] = x
+
+                q, r = self.labels[ID]['q'], self.labels[ID]['r']
+                y[i] = np.concatenate([q, r])
+
+            return X, y
+else:
+    class KerasDataGenerator:
+        def __init__(self, *args, **kwargs):
+            raise ImportError('tensorflow.keras is not available! Please install tensorflow.')
