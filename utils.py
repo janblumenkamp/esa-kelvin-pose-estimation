@@ -30,10 +30,10 @@ def process_json_dataset(root_dir):
     with open(os.path.join(root_dir, 'test.json'), 'r') as f:
         test_image_list = json.load(f)
 
-    with open(os.path.join(root_dir, 'tron.json'), 'r') as f:
-        tron_image_list = json.load(f)
+    with open(os.path.join(root_dir, 'real_test.json'), 'r') as f:
+        real_test_image_list = json.load(f)
 
-    partitions = {'test': [], 'train': [], 'tron': []}
+    partitions = {'test': [], 'train': [], 'real_test': []}
     labels = {}
 
     for image_ann in train_images_labels:
@@ -43,8 +43,8 @@ def process_json_dataset(root_dir):
     for image in test_image_list:
         partitions['test'].append(image['filename'])
 
-    for image in tron_image_list:
-        partitions['tron'].append(image['filename'])
+    for image in real_test_image_list:
+        partitions['real_test'].append(image['filename'])
 
     return partitions, labels
 
@@ -91,8 +91,8 @@ def project(q, r):
         points_body = np.transpose(p_axes)
 
         # transformation to camera frame
-        poseMat = np.hstack((np.transpose(quat2dcm(q)), np.expand_dims(r, 1)))
-        p_cam = np.dot(poseMat, points_body)
+        pose_mat = np.hstack((np.transpose(quat2dcm(q)), np.expand_dims(r, 1)))
+        p_cam = np.dot(pose_mat, points_body)
 
         # getting homogeneous coordinates
         points_camera_frame = p_cam / p_cam[2]

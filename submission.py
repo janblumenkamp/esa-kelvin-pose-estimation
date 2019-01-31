@@ -1,4 +1,3 @@
-import json
 import os
 from datetime import datetime
 import csv
@@ -10,12 +9,12 @@ class SubmissionWriter:
 
     def __init__(self):
         self.test_results = []
-        self.tron_results = []
+        self.real_test_results = []
         return
 
-    def _append(self, filename, q, r, tron):
-        if tron:
-            self.tron_results.append({'filename': filename, 'q': list(q), 'r': list(r)})
+    def _append(self, filename, q, r, real):
+        if real:
+            self.real_test_results.append({'filename': filename, 'q': list(q), 'r': list(r)})
         else:
             self.test_results.append({'filename': filename, 'q': list(q), 'r': list(r)})
         return
@@ -24,34 +23,29 @@ class SubmissionWriter:
 
         """ Append pose estimation for test image to submission. """
 
-        self._append(filename, q, r, tron=False)
+        self._append(filename, q, r, real=False)
         return
 
-    def append_tron(self, filename, q, r):
+    def append_real_test(self, filename, q, r):
 
-        """ Append pose estimation for tron image to submission. """
+        """ Append pose estimation for real image to submission. """
 
-        self._append(filename, q, r, tron=True)
+        self._append(filename, q, r, real=True)
         return
-
-    def checks(self):
-        return True
 
     def export(self, out_dir='', suffix=None):
 
         """ Exporting submission json file containing the collected pose estimates. """
 
         sorted_test = sorted(self.test_results, key=lambda k: k['filename'])
-        sorted_tron = sorted(self.tron_results, key=lambda k: k['filename'])
-        results = {'test': sorted_test,
-                   'tron': sorted_tron}
+        sorted_real_test = sorted(self.real_test_results, key=lambda k: k['filename'])
         timestamp = datetime.now().strftime("%Y%m%d-%H%M")
         if suffix is None:
             suffix = timestamp
         submission_path = os.path.join(out_dir, 'submission_{}.csv'.format(suffix))
         with open(submission_path, 'w') as f:
             csv_writer = csv.writer(f, lineterminator='\n')
-            for result in (sorted_test + sorted_tron):
+            for result in (sorted_test + sorted_real_test):
                 csv_writer.writerow([result['filename'], *(result['q'] + result['r'])])
 
         print('Submission saved to {}.'.format(submission_path))
