@@ -3,23 +3,10 @@ import json
 import os
 from PIL import Image
 from matplotlib import pyplot as plt
-
-# deep learning framework imports
-try:
-    from tensorflow.keras.utils import Sequence
-    from tensorflow.keras.preprocessing import image as keras_image
-    has_tf = True
-except ModuleNotFoundError:
-    has_tf = False
-
-try:
-    import torch
-    from torch.utils.data import Dataset
-    from torchvision import transforms
-    has_pytorch = True
-except ImportError:
-    has_pytorch = False
-
+from mpl_toolkits.mplot3d import Axes3D
+import mpl_toolkits.mplot3d as a3
+import matplotlib.colors as colors
+from matplotlib.collections import PolyCollection
 
 class Camera:
 
@@ -94,30 +81,183 @@ def quat2dcm(q):
 
     return dcm
 
+def pointInTriangle(t, p):
+    #https://stackoverflow.com/questions/2049582/how-to-determine-if-a-point-is-in-a-2d-triangle
+    a = 0.5 *(-t[1][1]*t[2][0] + t[0][1]*(-t[1][0] + t[2][0]) + t[0][0]*(t[1][1] - t[2][1]) + t[1][0]*t[2][1]);
+    s = 1/(2*a)*(t[0][1]*t[2][0] - t[0][0]*t[2][1] + (t[2][1] - t[0][1])*p[0] + (t[0][0] - t[2][0])*p[1]);
+    u = 1/(2*a)*(t[0][0]*t[1][1] - t[0][1]*t[1][0] + (t[0][1] - t[1][1])*p[0] + (t[1][0] - t[0][0])*p[1]);
+    return s > 0 and u > 0 and (1-s-u) > 0
+    
+class Plane:
+    def __init__(self, points):
+        if len(points) != 3:
+            raise ValueError("Plane always consists of three points")
+        
+        self.points = np.asarray(points)
+        n = np.cross(points[1] - points[0], points[2] - points[0])
+        self.normal = n / np.linalg.norm(n, 2)
+    
+    def intersect(self, v):
+        ndotu = self.normal.dot(v)
+        if abs(ndotu) < 1e-6:
+            raise ValueError("Line is parallel to plane")
+ 
+        return -self.points[0] - (self.normal.dot(-self.points[0]) / ndotu) * v + self.points[0]
+    
+    def intersects(self, v):
+        # First calculate intersection point of vector and this plane:
+        try:
+            intersection = self.intersect(v)
+        except ValueError:
+            # The vector is parallel to the line, so always return false (could be completely on it or completely off)
+            return False
+        
+        # We have a rotated 3D plane (i.e. z coordinates are level) and want to remove the
+        # z coordinates while keeping relations (i.e. project 3D plane to xy-plane)
+        # https://stackoverflow.com/questions/1023948/rotate-normal-vector-onto-axis-plane
+        zAxisNew = self.normal
+        xAxisOld = np.array([1,0,0])
+        if np.array_equal(np.absolute(zAxisNew), xAxisOld):
+            # the old x axis cannot be the same as the normal (the new z axis) since then the
+            # coordinate system is perpendicular to the xy plane. Therefore change x and z then
+            xAxisOld = np.array([0,0,1])
+        yAxisOld = np.array([0,1,0])
+        yAxisNew = np.cross(xAxisOld, zAxisNew)
+        xAxisNew = np.cross(zAxisNew, yAxisNew)
+        yAxisNew /= np.linalg.norm(yAxisNew, 2)
+        xAxisNew /= np.linalg.norm(xAxisNew, 2)
+        projected2dtriangle = np.asarray([[p.dot(xAxisNew), p.dot(yAxisNew)] for p in self.points])
+        # Now we know the 2d projection of the points of the polygon. Also project the 3d intersection point to the same plane
+        projected2dpoint = np.asarray([intersection.dot(xAxisNew), intersection.dot(yAxisNew)])
+        return intersection, pointInTriangle(projected2dtriangle, projected2dpoint)
 
-def project(q, r):
+def getSatelliteModel():
+    b = 0.6
+    a = 0.75
+    d = 0.8
+    c = 0.32
 
-        """ Projecting points to image frame to draw axes """
+    #     0         1      
+    #     +---a-----+
+    #  d-/|   u    /|-c
+    # 3 +---------+ | 2
+    #   |w| y  z  |x|     (y: front, z: back)
+    # 4 | +-------|-+ 5
+    #   |/ v (0,0)|/-b 
+    # 7 +---------+ 6
+    # reference points in satellite frame for drawing axes
+    return np.array([
+        [-a / 2,  d / 2, c], # 0
+        [ a / 2,  d / 2, c], # 1
+        [ a / 2, -d / 2, c], # 2
+        [-a / 2, -d / 2, c], # 3
+        [-a / 2,  b / 2, 0], # 4
+        [ a / 2,  b / 2, 0], # 5
+        [ a / 2, -b / 2, 0], # 6
+        [-a / 2, -b / 2, 0]  # 7
+    ]), np.array([
+        [0, 1, 2], [0, 3, 2], # u
+        [4, 5, 6], [4, 7, 6], # v
+        [0, 3, 7], [0, 4, 7], # w
+        [1, 2, 6], [1, 5, 6], # x
+        [3, 2, 6], [3, 7, 6], # y
+        [0, 1, 5], [0, 4, 5], # z
+    ])
 
-        # reference points in satellite frame for drawing axes
-        p_axes = np.array([[0, 0, 0, 1],
-                           [1, 0, 0, 1],
-                           [0, 1, 0, 1],
-                           [0, 0, 1, 1]])
-        points_body = np.transpose(p_axes)
+def projectModel(q, r, plot=False):
+    """ Projecting points to image frame to draw axes """
+    model_coordinates, cube_polygon_indices = getSatelliteModel()
+    p_axes = np.ones((model_coordinates.shape[0], model_coordinates.shape[1] + 1))
+    p_axes[:,:-1] = model_coordinates
+    points_body = np.transpose(p_axes)
 
-        # transformation to camera frame
-        pose_mat = np.hstack((np.transpose(quat2dcm(q)), np.expand_dims(r, 1)))
-        p_cam = np.dot(pose_mat, points_body)
+    # transformation to camera frame
+    pose_mat = np.hstack((np.transpose(quat2dcm(q)), np.expand_dims(r, 1)))
+    p_cam = np.dot(pose_mat, points_body)
 
-        # getting homogeneous coordinates
-        points_camera_frame = p_cam / p_cam[2]
+    # Indices of points describing 3 point triangles of the cube
+    # No point should intersect any of these triangles to be visible in the camera
 
-        # projection to image plane
-        points_image_plane = Camera.K.dot(points_camera_frame)
+    if plot:
+        fig = plt.figure()
+        ax = Axes3D(fig)
 
-        x, y = (points_image_plane[0], points_image_plane[1])
-        return x, y
+    points_camera_t = p_cam.transpose()
+    points_camera_collision_indices = []
+    for polygon_indices in cube_polygon_indices:
+        points_polygon = points_camera_t[polygon_indices]
+        plane = Plane(points_polygon)
+
+        if plot:
+            tri = a3.art3d.Poly3DCollection([plane.points], alpha=0.2)
+            tri.set_color([1,0,0])
+            tri.set_edgecolor('k')
+            ax.add_collection3d(tri)
+
+        for i, p in enumerate(points_camera_t):
+            intersection, intersects = plane.intersects(p)
+            if(intersects):
+                # The vector between camera origin and cube vertice intersects any of the 12 cube polygons.
+                # There are two border cases to check:
+                # 1) Sometimes an actual vertice intersects a neighboring polygon
+                # 2) The vector between camera and point intersects a polygon that actually is behind the point
+                dist_intersection = np.linalg.norm(intersection, 2)
+                dist_point = np.linalg.norm(p, 2)
+                if abs(dist_intersection - dist_point) > 0.01 and dist_intersection < dist_point and not i in points_camera_collision_indices:
+                    points_camera_collision_indices.append(i)
+                    if plot:
+                        ax.scatter([intersection[0]], [intersection[1]], [intersection[2]])
+
+    visible_points = np.ones(len(p_axes), dtype=bool)
+    visible_points[points_camera_collision_indices] = False
+
+    if plot:
+        for p in points_camera_t[visible_points]:
+            ax.plot([0, p[0]], [0, p[1]], [0, p[2]])
+
+        #ax.set_xlim(-1, 1)
+        #ax.set_ylim(-1, 1)
+        #ax.set_zlim(5, 7)
+        ax.autoscale()
+        ax.set_xlabel('X axis')
+        ax.set_ylabel('Y axis')
+        ax.set_zlabel('Z axis')
+
+        plt.show()
+
+    p_cam = points_camera_t.transpose()
+
+    # getting homogeneous coordinates
+    points_camera_frame = p_cam / p_cam[2]
+    # projection to image plane
+    points_image_plane = Camera.K.dot(points_camera_frame)
+
+    x, y = (points_image_plane[0], points_image_plane[1])
+    return x, y, visible_points
+
+def projectAxes(q, r):
+
+    """ Projecting points to image frame to draw axes """
+
+    # reference points in satellite frame for drawing axes
+    p_axes = np.array([[0, 0, 0, 1],
+                       [1, 0, 0, 1],
+                       [0, 1, 0, 1],
+                       [0, 0, 1, 1]])
+    points_body = np.transpose(p_axes)
+
+    # transformation to camera frame
+    pose_mat = np.hstack((np.transpose(quat2dcm(q)), np.expand_dims(r, 1)))
+    p_cam = np.dot(pose_mat, points_body)
+
+    # getting homogeneous coordinates
+    points_camera_frame = p_cam / p_cam[2]
+
+    # projection to image plane
+    points_image_plane = Camera.K.dot(points_camera_frame)
+
+    x, y = (points_image_plane[0], points_image_plane[1])
+    return x, y
 
 
 class SatellitePoseEstimationDataset:
@@ -157,140 +297,9 @@ class SatellitePoseEstimationDataset:
         # no pose label for test
         if partition == 'train':
             q, r = self.get_pose(i)
-            xa, ya = project(q, r)
+            xa, ya = projectAxes(q, r)
             ax.arrow(xa[0], ya[0], xa[1] - xa[0], ya[1] - ya[0], head_width=30, color='r')
             ax.arrow(xa[0], ya[0], xa[2] - xa[0], ya[2] - ya[0], head_width=30, color='g')
             ax.arrow(xa[0], ya[0], xa[3] - xa[0], ya[3] - ya[0], head_width=30, color='b')
 
         return
-
-
-if has_pytorch:
-    class PyTorchSatellitePoseEstimationDataset(Dataset):
-
-        """ SPEED dataset that can be used with DataLoader for PyTorch training. """
-
-        def __init__(self, split='train', speed_root='', transform=None):
-
-            if not has_pytorch:
-                raise ImportError('Pytorch was not imported successfully!')
-
-            if split not in {'train', 'test', 'real_test'}:
-                raise ValueError('Invalid split, has to be either \'train\', \'test\' or \'real_test\'')
-
-            with open(os.path.join(speed_root, split + '.json'), 'r') as f:
-                label_list = json.load(f)
-
-            self.sample_ids = [label['filename'] for label in label_list]
-            self.train = split == 'train'
-
-            if self.train:
-                self.labels = {label['filename']: {'q': label['q_vbs2tango'], 'r': label['r_Vo2To_vbs_true']}
-                               for label in label_list}
-            self.image_root = os.path.join(speed_root, 'images', split)
-
-            self.transform = transform
-
-        def __len__(self):
-            return len(self.sample_ids)
-
-        def __getitem__(self, idx):
-            sample_id = self.sample_ids[idx]
-            img_name = os.path.join(self.image_root, sample_id)
-
-            # note: despite grayscale images, we are converting to 3 channels here,
-            # since most pre-trained networks expect 3 channel input
-            pil_image = Image.open(img_name).convert('RGB')
-
-            if self.train:
-                q, r = self.labels[sample_id]['q'], self.labels[sample_id]['r']
-                y = np.concatenate([q, r])
-            else:
-                y = sample_id
-
-            if self.transform is not None:
-                torch_image = self.transform(pil_image)
-            else:
-                torch_image = pil_image
-
-            return torch_image, y
-else:
-    class PyTorchSatellitePoseEstimationDataset:
-        def __init__(self, *args, **kwargs):
-            raise ImportError('Pytorch is not available!')
-
-if has_tf:
-    class KerasDataGenerator(Sequence):
-
-        """ DataGenerator for Keras to be used with fit_generator (https://keras.io/models/sequential/#fit_generator)"""
-
-        def __init__(self, preprocessor, label_list, speed_root, batch_size=32, dim=(224, 224), n_channels=3, shuffle=True):
-
-            # loading dataset
-            self.image_root = os.path.join(speed_root, 'images', 'train')
-
-            # Initialization
-            self.preprocessor = preprocessor
-            self.dim = dim
-            self.batch_size = batch_size
-            self.labels = self.labels = {label['filename']: {'q': label['q_vbs2tango'], 'r': label['r_Vo2To_vbs_true']}
-                                         for label in label_list}
-            self.list_IDs = [label['filename'] for label in label_list]
-            self.n_channels = n_channels
-            self.shuffle = shuffle
-            self.indexes = None
-            self.on_epoch_end()
-
-        def __len__(self):
-
-            """ Denotes the number of batches per epoch. """
-
-            return int(np.floor(len(self.list_IDs) / self.batch_size))
-
-        def __getitem__(self, index):
-
-            """ Generate one batch of data """
-
-            # Generate indexes of the batch
-            indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
-
-            # Find list of IDs
-            list_IDs_temp = [self.list_IDs[k] for k in indexes]
-
-            # Generate data
-            X, y = self.__data_generation(list_IDs_temp)
-
-            return X, y
-
-        def on_epoch_end(self):
-
-            """ Updates indexes after each epoch """
-
-            self.indexes = np.arange(len(self.list_IDs))
-            if self.shuffle:
-                np.random.shuffle(self.indexes)
-
-        def __data_generation(self, list_IDs_temp):
-
-            """ Generates data containing batch_size samples """
-
-            # Initialization
-            X = np.empty((self.batch_size, *self.dim, self.n_channels))
-            y = np.empty((self.batch_size, 7), dtype=float)
-
-            # Generate data
-            for i, ID in enumerate(list_IDs_temp):
-                img_path = os.path.join(self.image_root, ID)
-                img = keras_image.load_img(img_path, target_size=(224, 224))
-                x = keras_image.img_to_array(img)
-                x = self.preprocessor(x)
-                X[i,] = x
-
-                q, r = self.labels[ID]['q'], self.labels[ID]['r']
-                y[i] = np.concatenate([q, r])
-
-            return X, y
-else:
-    class KerasDataGenerator:
-        def __init__(self, *args, **kwargs):
-            raise ImportError('tensorflow.keras is not available! Please install tensorflow.')
